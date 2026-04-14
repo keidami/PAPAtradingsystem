@@ -6,19 +6,19 @@ import numpy as np
 import requests
 from bs4 import BeautifulSoup
 import matplotlib.pyplot as plt
+from sqlalchemy import text  # 1. 필수 라이브러리 추가
 
 # --- 페이지 설정 ---
-st.set_page_config(page_title="아빠 힘내세요", layout="wide", initial_sidebar_state="collapsed")
+st.set_page_config(page_title="나만의 주식 앱", layout="wide", initial_sidebar_state="collapsed")
 
 # --- 데이터베이스 연결 (Streamlit 전용) ---
-# 배포 후 Streamlit Cloud 설정에서 SQL 설정을 활성화하면 이 부분이 작동합니다.
-# 로컬에서는 자동으로 임시 SQLite 파일에 저장됩니다.
 conn = st.connection("local_db", type="sql")
 
 def init_db():
     with conn.session as s:
-        s.execute('CREATE TABLE IF NOT EXISTS portfolio (name TEXT, buy1 REAL, buy2 REAL, qty1 INTEGER, qty2 INTEGER)')
-        s.execute('CREATE TABLE IF NOT EXISTS trades (name TEXT, profit REAL, date TEXT)')
+        # 2. 모든 SQL 문장을 text()로 감싸기
+        s.execute(text('CREATE TABLE IF NOT EXISTS portfolio (name TEXT, buy1 REAL, buy2 REAL, qty1 INTEGER, qty2 INTEGER)'))
+        s.execute(text('CREATE TABLE IF NOT EXISTS trades (name TEXT, profit REAL, date TEXT)'))
         s.commit()
 
 init_db()
@@ -42,7 +42,8 @@ def calculate_rsi(df, period=14):
     loss = -delta.where(delta < 0, 0)
     avg_gain = gain.ewm(com=period - 1, min_periods=period).mean()
     avg_loss = loss.ewm(com=period - 1, min_periods=period).mean()
-    return 100 - (100 / (1 + (avg_gain / avg_loss)))
+    rs = avg_gain / avg_loss
+    return 100 - (100 / (1 + rs))
 
 def get_news(stock_name):
     try:
@@ -66,8 +67,9 @@ with tab1:
 
     if submitted:
         ticker = ticker_map.get(name)
-        df = stock.get_market_ohlcv((datetime.datetime.now() - datetime.timedelta(days=180)).strftime("%Y%m%d"), 
-                                    datetime.datetime.now().strftime("%Y%m%d"), ticker)
+        end_date = datetime.datetime.now().strftime("%Y%m%d")
+        start_date = (datetime.datetime.now() - datetime.timedelta(days=180)).strftime("%Y%m%d")
+        df = stock.get_market_ohlcv(start_date, end_date, ticker)
         
         if not df.empty:
             current_price = df['종가'].iloc[-1]
@@ -86,7 +88,8 @@ with tab1:
             st.write(f"📍 지지선: {int(res['supp']):,}원")
             if st.button("➕ 포트폴리오에 추가"):
                 with conn.session as s:
-                    s.execute('INSERT INTO portfolio (name, buy1, buy2, qty1, qty2) VALUES (:name, :buy1, :buy2, :qty1, :qty2)',
+                    # 3. 데이터 삽입 부분 수정
+                    s.execute(text('INSERT INTO portfolio (name, buy1, buy2, qty1, qty2) VALUES (:name, :buy1, :buy2, :qty1, :qty2)'),
                               {"name": res['name'], "buy1": res['buy_p'], "buy2": None, "qty1": 1, "qty2": 0})
                     s.commit()
                 st.success("저장되었습니다!")
@@ -96,43 +99,40 @@ with tab1:
             for n in get_news(res['name']):
                 st.markdown(f"- [{n['title']}]({n['url']})")
 
-# ------------------ 2. 보유 종목 (모바일 최적화) ------------------
+# ------------------ 2. 보유 종목 ------------------
 with tab2:
-    port_df = conn.query("SELECT * FROM portfolio")
+    port_df = conn.query("SELECT *, rowid FROM portfolio")
     
-    if port_df.empty:
+    if port_df is None or port_df.empty:
         st.info("보유 중인 종목이 없습니다.")
     else:
         for i, row in port_df.iterrows():
             ticker = ticker_map.get(row['name'])
-            # 현재가 가져오기
-            curr_df = stock.get_market_ohlcv_by_date(datetime.datetime.now().strftime("%Y%m%d"), datetime.datetime.now().strftime("%Y%m%d"), ticker)
+            today = datetime.datetime.now().strftime("%Y%m%d")
+            curr_df = stock.get_market_ohlcv_by_date(today, today, ticker)
             curr = curr_df['종가'].iloc[-1] if not curr_df.empty else row['buy1']
             
             profit = ((curr - row['buy1']) / row['buy1']) * 100
-            stop_loss = row['buy1'] * 0.90
             
             with st.container(border=True):
                 c1, c2 = st.columns([3, 1])
                 with c1:
-                    if curr <= stop_loss:
-                        st.error(f"🚨 {row['name']} 손절가 이탈!")
-                    else:
-                        st.subheader(f"{row['name']} ({profit:+.2f}%)")
+                    st.subheader(f"{row['name']} ({profit:+.2f}%)")
                     st.write(f"현재: {int(curr):,} / 평단: {int(row['buy1']):,}")
                 with c2:
-                    if st.button("매도", key=f"sell_{i}"):
+                    if st.button("매도", key=f"sell_{row['rowid']}"):
                         with conn.session as s:
-                            s.execute('INSERT INTO trades (name, profit, date) VALUES (:n, :p, :d)',
+                            # 4. 매도 기록 및 삭제 부분 수정
+                            s.execute(text('INSERT INTO trades (name, profit, date) VALUES (:n, :p, :d)'),
                                       {"n": row['name'], "p": round(profit, 2), "d": str(datetime.date.today())})
-                            s.execute('DELETE FROM portfolio WHERE rowid = (SELECT rowid FROM portfolio LIMIT 1 OFFSET :idx)', {"idx": i})
+                            s.execute(text('DELETE FROM portfolio WHERE rowid = :rid'), {"rid": row['rowid']})
                             s.commit()
                         st.rerun()
 
 # ------------------ 3. 수익 통계 ------------------
 with tab3:
     trades_df = conn.query("SELECT * FROM trades")
-    if not trades_df.empty:
+    if trades_df is not None and not trades_df.empty:
         st.dataframe(trades_df, use_container_width=True)
         st.metric("평균 수익률", f"{trades_df['profit'].mean():.2f}%")
     else:
