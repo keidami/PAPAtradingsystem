@@ -64,38 +64,53 @@ st.title(f"📈 {user_id}님의 주식 대시보드")
 
 tab1, tab2, tab3 = st.tabs(["📊 분석 및 추가", "💼 보유종목", "📈 수익통계"])
 
-# [탭 1: 분석 및 추가]
+# [탭 1: 분석 및 추가] 수정 버전
 with tab1:
     with st.form("search_form"):
-        name = st.selectbox("종목 선택", stock_names)
+        # 1. 박스 대신 직접 글자를 타이핑하는 칸으로 변경 (로딩 0초)
+        search_name = st.text_input("종목명을 입력하세요", placeholder="예: 삼성전자, 카카오")
         buy_price = st.number_input("매수 예정가 (0이면 현재가 기준)", value=0)
         submitted = st.form_submit_button("데이터 분석")
 
     if submitted:
-        ticker = ticker_map.get(name)
-        today = datetime.datetime.now().strftime("%Y%m%d")
-        
-        # 최신 가격 가져오기 시도
-        df = stock.get_market_ohlcv(today, today, ticker)
-        if df.empty or df['종가'].iloc[-1] == 0:
-            start_7d = (datetime.datetime.now() - datetime.timedelta(days=7)).strftime("%Y%m%d")
-            df = stock.get_market_ohlcv(start_7d, today, ticker)
-        
-        if not df.empty:
-            current_price = df['종가'].iloc[-1]
-            # RSI 계산용 과거 데이터
-            hist_start = (datetime.datetime.now() - datetime.timedelta(days=180)).strftime("%Y%m%d")
-            df_hist = stock.get_market_ohlcv(hist_start, today, ticker)
-            rsi = calculate_rsi(df_hist).iloc[-1]
+        # 입력한 이름이 우리 종목 리스트에 있는지 확인
+        if search_name in ticker_map:
+            ticker = ticker_map.get(search_name)
+            today = datetime.datetime.now().strftime("%Y%m%d")
             
-            st.metric(name, f"{int(current_price):,}원", f"{rsi:.1f} RSI")
+            # 최신 가격 가져오기 로직 (기존과 동일)
+            df = stock.get_market_ohlcv(today, today, ticker)
+            if df.empty or df['종가'].iloc[-1] == 0:
+                start_7d = (datetime.datetime.now() - datetime.timedelta(days=7)).strftime("%Y%m%d")
+                df = stock.get_market_ohlcv(start_7d, today, ticker)
             
-            if st.button("➕ 내 포트폴리오에 추가"):
-                with conn.session as s:
-                    s.execute(text('INSERT INTO portfolio (user, name, buy1, qty1) VALUES (:u, :n, :b, :q)'),
-                              {"u": user_id, "n": name, "b": buy_price if buy_price > 0 else current_price, "q": 1})
-                    s.commit()
-                st.success(f"'{user_id}'님의 장부에 저장되었습니다!")
+            if not df.empty:
+                current_price = df['종가'].iloc[-1]
+                hist_start = (datetime.datetime.now() - datetime.timedelta(days=180)).strftime("%Y%m%d")
+                df_hist = stock.get_market_ohlcv(hist_start, today, ticker)
+                rsi = calculate_rsi(df_hist).iloc[-1]
+                
+                # 분석 결과 저장
+                st.session_state.analysis_result = {
+                    "name": search_name, 
+                    "curr": current_price, 
+                    "rsi": rsi, 
+                    "buy_p": buy_price if buy_price > 0 else current_price
+                }
+                
+                st.metric(search_name, f"{int(current_price):,}원", f"{rsi:.1f} RSI")
+        else:
+            st.error(f"'{search_name}' 종목을 찾을 수 없습니다. 정확한 이름을 입력해주세요.")
+
+    # 분석 결과가 있을 때만 추가 버튼 표시
+    if st.session_state.get('analysis_result') and st.session_state.analysis_result['name'] == search_name:
+        if st.button("➕ 내 포트폴리오에 추가"):
+            with conn.session as s:
+                s.execute(text('INSERT INTO portfolio (user, name, buy1, qty1) VALUES (:u, :n, :b, :q)'),
+                          {"u": user_id, "n": search_name, "b": st.session_state.analysis_result['buy_p'], "q": 1})
+                s.commit()
+            st.success(f"'{user_id}'님의 장부에 저장되었습니다!")
+
 
 # [탭 2: 보유 종목]
 with tab2:
