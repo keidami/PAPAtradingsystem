@@ -36,20 +36,22 @@ if 'analysis_result' not in st.session_state:
 # --- 주요 함수 ---
 @st.cache_data
 def get_ticker_map():
-    tickers = stock.get_market_ticker_list()
-    return {stock.get_market_ticker_name(t): t for t in tickers}
+    try:
+        # 코스피(KOSPI) 기준으로 종목 리스트를 가져옵니다.
+        tickers = stock.get_market_ticker_list(market="KOSPI")
+        # 만약 코스피가 비어있다면 전체 리스트를 시도합니다.
+        if not tickers:
+            tickers = stock.get_market_ticker_list()
+        
+        return {stock.get_market_ticker_name(t): t for t in tickers}
+    except Exception as e:
+        # 에러 발생 시(휴장일 등), 특정 날짜(어제 혹은 그저께)를 지정해서 강제로 가져옵니다.
+        target_date = (datetime.datetime.now() - datetime.timedelta(days=3)).strftime("%Y%m%d")
+        tickers = stock.get_market_ticker_list(date=target_date)
+        return {stock.get_market_ticker_name(t): t for t in tickers}
 
 ticker_map = get_ticker_map()
-stock_names = list(ticker_map.keys())
 
-def calculate_rsi(df, period=14):
-    delta = df['종가'].diff()
-    gain = delta.where(delta > 0, 0)
-    loss = -delta.where(delta < 0, 0)
-    avg_gain = gain.ewm(com=period - 1, min_periods=period).mean()
-    avg_loss = loss.ewm(com=period - 1, min_periods=period).mean()
-    rs = avg_gain / avg_loss
-    return 100 - (100 / (1 + rs))
 
 # --- 앱 레이아웃 ---
 st.title(f"📈 {user_id}님의 주식 대시보드")
