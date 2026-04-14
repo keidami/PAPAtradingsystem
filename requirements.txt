@@ -1,0 +1,8 @@
+streamlit
+pykrx
+pandas
+numpy
+matplotlib
+beautifulsoup4
+requests
+sqlalchemy
