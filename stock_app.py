@@ -9,7 +9,7 @@ import matplotlib.pyplot as plt
 from sqlalchemy import text
 
 # --- 1. 페이지 설정 ---
-st.set_page_config(page_title="나만의 주식 앱", layout="wide")
+st.set_page_config(page_title="아빠 힘내세요", layout="wide")
 
 # --- 2. 데이터베이스 연결 및 초기화 ---
 conn = st.connection("local_db", type="sql")
