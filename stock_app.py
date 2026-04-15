@@ -1,131 +1,188 @@
-import streamlit as st
-from pykrx import stock
+import sys
+import types
 import datetime
 import pandas as pd
 from sqlalchemy import text
+import streamlit as st
+import time
+from pykrx import stock
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots # RSI 차트 분리를 위해 추가
 
-# --- 1. 페이지 설정 ---
-st.set_page_config(page_title="아빠 힘내세요", page_icon="📈", layout="wide")
+# --- [1. 시스템 환경 설정 및 함수 정의] ---
+try:
+    import pkg_resources
+except ImportError:
+    m = types.ModuleType('pkg_resources')
+    sys.modules['pkg_resources'] = m
+    m.resource_filename = lambda x, y: ""
 
-# --- 2. 데이터베이스 연결 및 초기화 ---
-conn = st.connection("local_db", type="sql")
-
-def init_db():
-    with conn.session as s:
-        s.execute(text('CREATE TABLE IF NOT EXISTS portfolio (user TEXT, name TEXT, buy1 REAL, qty1 INTEGER)'))
-        s.execute(text('CREATE TABLE IF NOT EXISTS trades (user TEXT, name TEXT, profit REAL, date TEXT)'))
-        s.commit()
-
-init_db()
-
-# --- 3. 사용자 설정 (사이드바) ---
-with st.sidebar:
-    st.header("👤 개인 설정")
-    user_id = st.text_input("사용자 이름을 입력하세요", value="나").strip()
-    st.info(f"'{user_id}' 님의 장부에 접속 중입니다.")
-
-# --- 4. 주요 함수 ---
-
-@st.cache_data(ttl=3600) # 1시간마다 캐시 갱신
-def get_ticker_map():
-    try:
-        # 코스피/코스닥 종목 리스트 통합
-        tickers = stock.get_market_ticker_list(market="ALL")
-        return {stock.get_market_ticker_name(t): t for t in tickers}
-    except Exception:
-        # 에러 발생 시 안전하게 3일 전 날짜 데이터 참조
-        target_date = (datetime.datetime.now() - datetime.timedelta(days=3)).strftime("%Y%m%d")
-        tickers = stock.get_market_ticker_list(date=target_date, market="ALL")
-        return {stock.get_market_ticker_name(t): t for t in tickers}
-
+# RSI 계산을 위한 함수
 def calculate_rsi(df, period=14):
     delta = df['종가'].diff()
-    gain = delta.where(delta > 0, 0)
-    loss = -delta.where(delta < 0, 0)
-    avg_gain = gain.ewm(com=period - 1, min_periods=period).mean()
-    avg_loss = loss.ewm(com=period - 1, min_periods=period).mean()
-    rs = avg_gain / avg_loss
+    gain = delta.where(delta > 0, 0).ewm(com=period - 1, min_periods=period).mean()
+    loss = -delta.where(delta < 0, 0).ewm(com=period - 1, min_periods=period).mean()
+    rs = gain / loss
     return 100 - (100 / (1 + rs))
 
-# 앱 시작 시 리스트 로딩 (로딩 중 메시지 표시)
-with st.spinner('종목 리스트를 불러오는 중입니다... 잠시만 기다려주세요.'):
-    ticker_map = get_ticker_map()
+# --- [2. 앱 기본 설정] ---
+st.set_page_config(page_title="아빠의 주식장부", page_icon="📈", layout="wide")
+conn = st.connection("local_db", type="sql", url="sqlite:///stock_app.db")
 
-# --- 5. 앱 레이아웃 ---
-st.title(f"👨‍💻 {user_id}님의 '아빠 힘내세요' 주식 앱")
+with conn.session as s:
+    s.execute(text('CREATE TABLE IF NOT EXISTS portfolio (user TEXT, name TEXT, buy1 REAL, qty1 INTEGER)'))
+    s.commit()
 
-tab1, tab2, tab3 = st.tabs(["📊 분석 및 추가", "💼 보유종목", "📈 수익통계"])
+# 스타일 설정
+st.markdown("""
+    <style>
+    [data-testid="stMetricValue"] { font-size: 1.1rem !important; font-weight: bold; color: #1f77b4; }
+    .stMetric { background-color: #f8f9fa; padding: 10px; border-radius: 10px; border: 1px solid #ddd; }
+    </style>
+    """, unsafe_allow_html=True)
 
-# [탭 1: 분석 및 추가]
+# --- [3. 종목 리스트 확보] ---
+@st.cache_data(ttl=3600)
+def get_full_master():
+    for i in range(15):
+        target_date = (datetime.datetime.now() - datetime.timedelta(days=i)).strftime("%Y%m%d")
+        try:
+            tickers = stock.get_market_ticker_list(target_date, market="ALL")
+            if tickers:
+                return {stock.get_market_ticker_name(t).replace(" ", ""): t for t in tickers}
+        except: continue
+    return {}
+
+master_list = get_full_master()
+
+# --- [4. 메인 화면] ---
+# 사이드바에서 이름을 입력받고 바로 아래에 알림 추가
+user_id = st.sidebar.text_input("사용자", value="나").strip()
+
+if user_id:
+    # 사용자 이름이 입력되어 있으면 초록색 알림창을 띄워줍니다.
+    st.sidebar.success(f"✅ '{user_id}' 님 장부 접속 중")
+else:
+    # 이름이 비어있으면 경고 메시지를 보여줍니다.
+    st.sidebar.warning("사용자 이름을 입력해주세요.")
+
+st.title("📈 아빠의 주식장부")
+
+tab1, tab2 = st.tabs(["📊 종목 분석 & 뉴스", "💼 나의 장부"])
+
 with tab1:
-    with st.form("search_form"):
-        search_name = st.text_input("종목명을 입력하세요", placeholder="예: 삼성전자, 카카오")
-        buy_price = st.number_input("매수 예정가 (0이면 현재가 기준)", value=0)
-        submitted = st.form_submit_button("데이터 분석 시작")
+    c1, c2, c3 = st.columns([2, 1, 1])
+    query = c1.text_input("종목명 또는 코드", placeholder="예: 삼성전자, 네오셈...").strip().replace(" ", "")
+    b_price = c2.number_input("매수가(원)", value=0, step=1)
+    b_qty = c3.number_input("수량(주)", value=1, min_value=1)
 
-    if submitted:
-        search_name = search_name.strip()
-        
-        if not ticker_map:
-            with st.spinner('데이터를 다시 불러오고 있습니다...'):
-                ticker_map = get_ticker_map()
+    target_code, target_name = None, None
 
-        if search_name in ticker_map:
-            ticker = ticker_map.get(search_name)
-            
-            # 분석 중 로딩 표시
-            with st.spinner(f'{search_name} 데이터를 분석 중입니다...'):
-                today = datetime.datetime.now().strftime("%Y%m%d")
-                df = stock.get_market_ohlcv(today, today, ticker)
-                
-                if df.empty or df['종가'].iloc[-1] == 0:
-                    start_7d = (datetime.datetime.now() - datetime.timedelta(days=7)).strftime("%Y%m%d")
-                    df = stock.get_market_ohlcv(start_7d, today, ticker)
-                
-                if not df.empty:
-                    current_price = df['종가'].iloc[-1]
-                    hist_start = (datetime.datetime.now() - datetime.timedelta(days=180)).strftime("%Y%m%d")
-                    df_hist = stock.get_market_ohlcv(hist_start, today, ticker)
-                    rsi = calculate_rsi(df_hist).iloc[-1]
-                    
-                    st.session_state.analysis_result = {
-                        "name": search_name, 
-                        "curr": current_price, 
-                        "rsi": rsi, 
-                        "buy_p": buy_price if buy_price > 0 else current_price
-                    }
-                    
-                    st.divider()
-                    col1, col2 = st.columns(2)
-                    col1.metric("현재가", f"{int(current_price):,}원")
-                    col2.metric("RSI (상태)", f"{rsi:.1f}", delta="과매수" if rsi > 70 else "과매도" if rsi < 30 else "보통")
-                    
-                    if st.button("➕ 내 포트폴리오에 추가"):
-                        with conn.session as s:
-                            s.execute(text('INSERT INTO portfolio (user, name, buy1, qty1) VALUES (:u, :n, :b, :q)'),
-                                      {"u": user_id, "n": search_name, "b": st.session_state.analysis_result['buy_p'], "q": 1})
-                            s.commit()
-                        st.success(f"'{user_id}'님의 장부에 저장되었습니다!")
-                else:
-                    st.error("주가 데이터를 가져오지 못했습니다. 종목명을 다시 확인해주세요.")
+    if query:
+        if query.isdigit() and len(query) == 6:
+            target_code = query
+            try: target_name = stock.get_market_ticker_name(query)
+            except: target_name = f"종목({query})"
         else:
-            st.error(f"'{search_name}' 종목을 찾을 수 없습니다. 정확한 명칭인지 확인해주세요.")
+            for name, code in master_list.items():
+                if query in name:
+                    target_code, target_name = code, name
+                    break
 
-# [탭 2, 3은 기존과 동일하되 디자인 소폭 개선]
+    if target_code:
+        with st.spinner(f'{target_name} 정보를 불러오는 중...'):
+            end_d = datetime.datetime.now().strftime("%Y%m%d")
+            start_d = (datetime.datetime.now() - datetime.timedelta(days=120)).strftime("%Y%m%d")
+            df = stock.get_market_ohlcv(start_d, end_d, target_code)
+            
+            if not df.empty:
+                curr = int(df['종가'].iloc[-1])
+                rsi_series = calculate_rsi(df) # RSI 계산
+                rsi_val = rsi_series.iloc[-1]
+                base = b_price if b_price > 0 else curr
+                
+                st.divider()
+                st.subheader(f"🔍 {target_name} ({target_code})")
+                m1, m2, m3, m4 = st.columns(4)
+                m1.metric("현재가", f"{curr:,}원")
+                m2.metric("RSI (14일)", f"{rsi_val:.1f}", delta="과매수" if rsi_val > 70 else "과매도" if rsi_val < 30 else "보통")
+                m3.metric("2차(-6%)", f"{int(base*0.94):,}원")
+                m4.metric("손절(-10%)", f"{int(base*0.90):,}원")
+
+                # --- [차트 보강: 캔들 + RSI + 지지선] ---
+                fig = make_subplots(rows=2, cols=1, shared_xaxes=True, 
+                                    vertical_spacing=0.1, subplot_titles=('주가 및 지지선', 'RSI 지표'),
+                                    row_heights=[0.7, 0.3])
+
+                # 1. 캔들차트 추가
+                fig.add_trace(go.Candlestick(x=df.index, open=df['시가'], high=df['고가'], low=df['저가'], close=df['종가'], name='주가'), row=1, col=1)
+                
+                # 지지선(매매 기준선) 추가
+                fig.add_hline(y=base, line_dash="dash", line_color="green", annotation_text="1차 매수", row=1, col=1)
+                fig.add_hline(y=base*0.94, line_dash="dash", line_color="orange", annotation_text="2차 매수", row=1, col=1)
+                fig.add_hline(y=base*0.90, line_dash="dash", line_color="red", annotation_text="손절선", row=1, col=1)
+
+                # 2. RSI 차트 추가
+                fig.add_trace(go.Scatter(x=rsi_series.index, y=rsi_series, name='RSI', line=dict(color='purple')), row=2, col=1)
+                fig.add_hline(y=70, line_dash="dot", line_color="red", row=2, col=1) # 과매수 기준선
+                fig.add_hline(y=30, line_dash="dot", line_color="blue", row=2, col=1) # 과매도 기준선
+
+                fig.update_layout(height=600, xaxis_rangeslider_visible=False, showlegend=False, margin=dict(l=0, r=0, t=30, b=0))
+                st.plotly_chart(fig, use_container_width=True)
+
+                st.markdown("### 📰 최신 뉴스")
+                try:
+                    news_df = stock.get_market_news(target_code).head(3)
+                    if not news_df.empty:
+                        for _, row in news_df.iterrows():
+                            st.info(f"**[{row['날짜']}]** {row['제목']}")
+                except: st.write("뉴스 정보를 불러올 수 없습니다.")
+
+                if st.button(f"🚀 {target_name} 장부 등록"):
+                    save_name = f"{target_name}({target_code})"
+                    with conn.session as s:
+                        s.execute(text('INSERT INTO portfolio (user, name, buy1, qty1) VALUES (:u, :n, :b, :q)'),
+                                  {"u": user_id, "n": save_name, "b": base, "q": b_qty})
+                        s.commit()
+                    
+                    st.success(f"✅ '{target_name}' 종목이 장부에 저장되었습니다!")
+                    st.balloons()
+                    time.sleep(1)
+                    st.rerun()
+    elif query:
+        st.error("종목을 찾을 수 없습니다.")
+
 with tab2:
-    port_df = conn.query(f"SELECT *, rowid FROM portfolio WHERE user = '{user_id}'", ttl=0)
-    if port_df is not None and not port_df.empty:
-        for i, row in port_df.iterrows():
+    p_df = conn.query(f"SELECT *, rowid FROM portfolio WHERE user = '{user_id}'", ttl=0)
+    if p_df is not None and not p_df.empty:
+        total_profit = 0
+        for _, row in p_df.iterrows():
             with st.container(border=True):
-                c1, c2 = st.columns([4, 1])
-                c1.write(f"**{row['name']}** | 매수가: {int(row['buy1']):,}원")
-                if c2.button("매도", key=f"s_{row['rowid']}"):
+                col_i, col_d = st.columns([4, 1])
+                full_name = row['name']
+                code = full_name.split('(')[-1].replace(')', '')
+                
+                c_df = stock.get_market_ohlcv((datetime.datetime.now()-datetime.timedelta(days=7)).strftime("%Y%m%d"), 
+                                              datetime.datetime.now().strftime("%Y%m%d"), code)
+                now_p = int(c_df['종가'].iloc[-1]) if not c_df.empty else 0
+                b1, q = int(row['buy1']), int(row['qty1'])
+                profit = (now_p - b1) * q
+                total_profit += profit
+
+                col_i.write(f"### {full_name}")
+                m1, m2, m3 = col_i.columns(3)
+                m1.metric("현재가", f"{now_p:,}원")
+                m2.metric("매수가", f"{b1:,}원")
+                m3.metric("수익금", f"{profit:,}원", delta=f"{((now_p/b1)-1)*100:.2f}%" if b1>0 else "0%")
+                
+                col_i.write(f"**수량:** {q}주 | **2차 매수:** {int(b1*0.94):,}원 | **손절선:** {int(b1*0.90):,}원")
+                
+                if col_d.button("삭제", key=f"del_{row['rowid']}"):
                     with conn.session as s:
                         s.execute(text('DELETE FROM portfolio WHERE rowid = :rid'), {"rid": row['rowid']})
                         s.commit()
                     st.rerun()
+        st.divider()
+        st.subheader(f"💰 총 수익 합계: {int(total_profit):,}원")
     else:
-        st.info("등록된 종목이 없습니다.")
-
-with tab3:
-    st.write("준비 중인 기능입니다.")
+        st.info("장부가 비어 있습니다.")
